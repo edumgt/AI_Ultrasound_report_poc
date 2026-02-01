@@ -63,7 +63,7 @@ class MainWindow(QMainWindow):
             return
 
         # On Windows, explicitly use spawn for stability
-        mp.set_start_method("spawn", force=True)
+        self._ctx = mp.get_context("spawn")
 
         self.setWindowTitle("Ultrasound Auto Report PoC")
         self.status_label = QLabel("Idle")
@@ -157,12 +157,14 @@ class MainWindow(QMainWindow):
             return
         self.status_label.setText("Starting STT subprocess...")
         self._log("Starting STT subprocess...")
-        self._out_q = mp.Queue()
-        self._ctrl_q = mp.Queue()
-        self._stt_proc = mp.Process(
+        if os.environ.get('INPUT_DEVICE'):
+            self._log(f"INPUT_DEVICE={os.environ.get('INPUT_DEVICE')}")
+        self._out_q = self._ctx.Queue()
+        self._ctrl_q = self._ctx.Queue()
+        self._stt_proc = self._ctx.Process(
             target=stt_worker_main,
             args=(self._out_q, self._ctrl_q, self._stt_cfg),
-            daemon=True
+            daemon=False
         )
         self._stt_proc.start()
         self._log(f'STT subprocess started pid={self._stt_proc.pid}')
@@ -233,6 +235,9 @@ class MainWindow(QMainWindow):
                     em = msg.get("msg", "")
                     self._log(f"error: {em}")
                     QMessageBox.critical(self, "STT Error", em)
+                elif mtype == "audio_level":
+                    rms = msg.get("rms", 0.0)
+                    self.status_label.setText(f"Listening... mic rms={rms:.4f}")
                 elif mtype == "text":
                     text = msg.get("text", "")
                     if text:

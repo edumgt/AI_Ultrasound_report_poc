@@ -11,14 +11,28 @@ def stt_worker_main(out_q, ctrl_q, cfg: dict):
     """
     # Make native path conservative
     os.environ.setdefault("CT2_FORCE_CPU_ISA", "GENERIC")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
     # Imports inside process (important on Windows spawn)
     import sounddevice as sd
     from faster_whisper import WhisperModel
 
     sample_rate = int(cfg.get("sample_rate", 16000))
-    block_ms = int(cfg.get("block_ms", 500))
+    block_ms = int(cfg.get("block_ms", 250))
     blocksize = int(sample_rate * (block_ms / 1000.0))
+
+    # Input device selection (optional)
+    # - set env INPUT_DEVICE=9 or cfg["input_device"]=9
+    input_device = cfg.get("input_device", None)
+    try:
+        if input_device is None and os.environ.get("INPUT_DEVICE"):
+            input_device = int(os.environ["INPUT_DEVICE"])
+    except Exception:
+        input_device = None
+
 
     model_size = cfg.get("model_size", "tiny")
     device = cfg.get("device", "cpu")
@@ -29,18 +43,25 @@ def stt_worker_main(out_q, ctrl_q, cfg: dict):
     initial_prompt = cfg.get("initial_prompt", "")
 
     out_q.put({"type": "status", "msg": f"Loading STT model ({model_size}) in subprocess..."})
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    model = WhisperModel(model_size, device=device, compute_type=compute_type, cpu_threads=1, num_workers=1)
     out_q.put({"type": "status", "msg": "STT model loaded."})
 
     audio_q: "pyqueue.Queue[np.ndarray]" = pyqueue.Queue()
 
     running = True
 
+    nonlocal_last = [0.0]
+
+
     def callback(indata, frames, t, status):
         # Never raise in callback; just enqueue
         try:
             audio = np.squeeze(indata.copy()).astype(np.float32)
+            # crude RMS meter
+            rms = float(np.sqrt(np.mean(np.square(audio))) if audio.size else 0.0)
             audio_q.put(audio)
+            # keep latest level in outer scope via closure
+            nonlocal_last[0] = rms
         except Exception as e:
             try:
                 out_q.put({"type": "error", "msg": f"audio callback error: {e}"})
@@ -48,6 +69,8 @@ def stt_worker_main(out_q, ctrl_q, cfg: dict):
                 pass
 
     stream = sd.InputStream(
+        device=input_device,
+
         channels=1,
         samplerate=sample_rate,
         blocksize=blocksize,
@@ -58,10 +81,19 @@ def stt_worker_main(out_q, ctrl_q, cfg: dict):
     out_q.put({"type": "status", "msg": "Listening (subprocess)..."})
 
     buffer = []
-    target_samples = int(sample_rate * 1.5)
+    last_level_t = time.time()
+    last_level = 0.0
+    target_samples = int(sample_rate * 0.8)
 
     try:
         while running:
+            # Periodic audio level report
+            now = time.time()
+            if now - last_level_t >= 1.0:
+                last_level = float(nonlocal_last[0])
+                out_q.put({"type": "audio_level", "rms": last_level})
+                last_level_t = now
+
             # Stop command?
             try:
                 cmd = ctrl_q.get_nowait()
