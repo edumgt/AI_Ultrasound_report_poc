@@ -1,0 +1,77 @@
+{
+  "terms": [
+    {
+      "key": "RIGHT_LOBE",
+      "canonical": "Right Lobe",
+      "aliases": [
+        "라이트 로브",
+        "right robe",
+        "라잇 로브",
+        "라이트롭",
+        "라잇롭"
+      ]
+    },
+    {
+      "key": "LEFT_LOBE",
+      "canonical": "Left Lobe",
+      "aliases": [
+        "레프트 로브",
+        "left robe",
+        "레프 로브",
+        "레프트롭"
+      ]
+    },
+    {
+      "key": "HYPOECHOIC",
+      "canonical": "Hypoechoic",
+      "aliases": [
+        "하이포에코익",
+        "하이포 에코익",
+        "hypo echoic",
+        "하이포에코이"
+      ]
+    },
+    {
+      "key": "HYPERECHOIC",
+      "canonical": "Hyperechoic",
+      "aliases": [
+        "하이퍼에코익",
+        "하이퍼 에코익",
+        "hyper echoic"
+      ]
+    },
+    {
+      "key": "MASS",
+      "canonical": "Mass",
+      "aliases": [
+        "매스",
+        "masss",
+        "mas",
+        "마스"
+      ]
+    },
+    {
+      "key": "NODULE",
+      "canonical": "Nodule",
+      "aliases": [
+        "노듈",
+        "노듈러",
+        "noddle"
+      ]
+    }
+  ],
+  "categories": {
+    "location": [
+      "RIGHT_LOBE",
+      "LEFT_LOBE"
+    ],
+    "lesion": [
+      "MASS",
+      "NODULE"
+    ],
+    "feature": [
+      "HYPOECHOIC",
+      "HYPERECHOIC"
+    ]
+  }
+}
