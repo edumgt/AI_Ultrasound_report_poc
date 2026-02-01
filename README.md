@@ -1,4 +1,7 @@
-# Ultrasound Auto Report PoC (Windows / Python)
+# Ultrasound Auto Report PoC (Windows)
+
+## Key change (stability)
+STT + microphone capture runs in a **separate subprocess** to avoid Qt(QThread) + native library crashes (0xC0000005).
 
 ## Setup
 ```powershell
@@ -13,12 +16,13 @@ python app.py
 ```
 
 ## Usage
-- F2: Start/Stop
+- F2: Start/Stop (starts STT subprocess)
 - F3: Reset
 - Ctrl+Enter: Generate report
-- Ctrl+S: Save session to data/sessions/<timestamp>/
+- Ctrl+S: Save session
 
-## Notes
-- STT model loads only when you press Start (F2).
-- Default model is 'tiny' for fast/robust first test.
-- For stability, CT2_FORCE_CPU_ISA is set to GENERIC if not already set.
+## Diagnostics
+Run subprocess-only STT smoke test (10 seconds):
+```powershell
+python .\diagnostics\stt_subprocess_smoke.py
+```

@@ -1,71 +1,25 @@
 from __future__ import annotations
 import os
-import queue
-import numpy as np
+import multiprocessing as mp
 
-from PySide6.QtCore import QThread, Signal, QObject, Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QMainWindow, QTextEdit, QPushButton, QLabel, QVBoxLayout, QWidget,
     QHBoxLayout, QMessageBox
 )
 
-# SAFE_MODE=1이면 STT/오디오 없이 UI만 띄워 네이티브 크래시 원인을 분리합니다.
 SAFE_MODE = os.environ.get("SAFE_MODE", "0") == "1"
 
 if not SAFE_MODE:
-    from core.audio_capture import AudioCapture
     from core.term_correction import TermCorrector
     from core.structuring import Structurer
     from core.report_template import ReportRenderer
     from core.storage import save_session
-
-
-class Worker(QObject):
-    partial = Signal(str, list)   # (corrected_text, changes)
-    status = Signal(str)
-    error = Signal(str)
-
-    def __init__(self, audio_q: "queue.Queue[np.ndarray]", stt, corrector, sample_rate: int = 16000):
-        super().__init__()
-        self.audio_q = audio_q
-        self.stt = stt
-        self.corrector = corrector
-        self.sample_rate = sample_rate
-        self.running = False
-
-    def run(self):
-        self.running = True
-        self.status.emit("Listening...")
-        buffer = []
-
-        while self.running:
-            try:
-                chunk = self.audio_q.get(timeout=0.2)
-                buffer.append(chunk)
-
-                if sum(len(x) for x in buffer) >= int(self.sample_rate * 1.5):
-                    audio = np.concatenate(buffer).astype(np.float32)
-                    buffer.clear()
-
-                    text = self.stt.transcribe(audio, self.sample_rate)
-                    if text:
-                        corrected, changes = self.corrector.correct(text)
-                        self.partial.emit(corrected, changes)
-
-            except queue.Empty:
-                pass
-            except Exception as e:
-                self.error.emit(str(e))
-
-        self.status.emit("Stopped.")
-
-    def stop(self):
-        self.running = False
+    from core.stt_process import stt_worker_main
 
 
 class MainWindow(QMainWindow):
-    # -------- SAFE MODE UI --------
     def _setup_ui_safe_only(self):
         self.setWindowTitle("Ultrasound Auto Report PoC (SAFE_MODE)")
         self.status_label = QLabel("SAFE_MODE=1 (UI only)")
@@ -86,7 +40,6 @@ class MainWindow(QMainWindow):
     def _setup_shortcuts_safe_only(self):
         QShortcut(QKeySequence("Esc"), self, activated=self.close)
 
-    # -------- NORMAL MODE --------
     def __init__(self, assets_dir: str, sessions_dir: str):
         super().__init__()
         self.assets_dir = assets_dir
@@ -97,49 +50,10 @@ class MainWindow(QMainWindow):
             self._setup_shortcuts_safe_only()
             return
 
+        # On Windows, explicitly use spawn for stability
+        mp.set_start_method("spawn", force=True)
+
         self.setWindowTitle("Ultrasound Auto Report PoC")
-        self.audio_q: "queue.Queue[np.ndarray]" = queue.Queue()
-
-        self.corrector, categories = TermCorrector.load(os.path.join(self.assets_dir, "terms.json"))
-        self.structurer = Structurer(categories, key_to_canonical=self.corrector.key_to_canonical)
-        self.renderer = ReportRenderer(os.path.join(self.assets_dir, "templates"))
-
-        prompt = self._build_prompt()
-        self._stt_cfg = dict(
-            model_size="tiny",
-            device="cpu",
-            compute_type="int8",
-            beam_size=1,
-            vad_filter=False,
-            initial_prompt=prompt
-        )
-        self.stt = None
-
-        self.capture = AudioCapture(self.audio_q, sample_rate=16000, block_ms=500)
-        self.worker = None
-        self.thread = None
-
-        self._setup_ui()
-        self._setup_shortcuts()
-
-        self.raw_text_accum = ""
-        self.corrected_text_accum = ""
-        self.last_report = ""
-
-    def _build_prompt(self) -> str:
-        ex_path = os.path.join(self.assets_dir, "examples.txt")
-        examples = ""
-        if os.path.exists(ex_path):
-            with open(ex_path, "r", encoding="utf-8") as f:
-                examples = f.read().strip()
-
-        return (
-            "You are transcribing an ultrasound medical dictation.\n"
-            "Korean and English mixed medical terms must be written in correct English spelling.\n"
-            f"{examples}\n"
-        )
-
-    def _setup_ui(self):
         self.status_label = QLabel("Idle")
         self.status_label.setAlignment(Qt.AlignLeft)
 
@@ -178,108 +92,143 @@ class MainWindow(QMainWindow):
         w.setLayout(layout)
         self.setCentralWidget(w)
 
-    def _setup_shortcuts(self):
+        # Domain logic
+        self.corrector, categories = TermCorrector.load(os.path.join(self.assets_dir, "terms.json"))
+        self.structurer = Structurer(categories, key_to_canonical=self.corrector.key_to_canonical)
+        self.renderer = ReportRenderer(os.path.join(self.assets_dir, "templates"))
+
+        # Subprocess handles audio+STT
+        prompt = self._build_prompt()
+        self._stt_cfg = dict(
+            model_size="tiny",
+            device="cpu",
+            compute_type="int8",
+            beam_size=1,
+            vad_filter=False,
+            language=None,
+            initial_prompt=prompt,
+            sample_rate=16000,
+            block_ms=500,
+        )
+        self._stt_proc: mp.Process | None = None
+        self._out_q = None
+        self._ctrl_q = None
+
+        # Poll subprocess queue from UI thread
+        self._timer = QTimer(self)
+        self._timer.setInterval(100)
+        self._timer.timeout.connect(self._drain_out_queue)
+        self._timer.start()
+
+        # shortcuts
         QShortcut(QKeySequence("F2"), self, activated=self.toggle)
         QShortcut(QKeySequence("F3"), self, activated=self.reset)
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.generate_report)
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save)
 
-    def _ensure_worker(self) -> bool:
-        os.environ.setdefault("CT2_FORCE_CPU_ISA", "GENERIC")
+        self.last_report = ""
 
-        if self.stt is None:
-            try:
-                print("[ui] loading STT model...", flush=True)
-                self.on_status("Loading STT model... (first run may download)")
-                from core.stt_whisper import WhisperSTT, STTConfig
-                cfg = STTConfig(**self._stt_cfg)
-                self.stt = WhisperSTT(cfg)
-                print("[ui] STT model loaded", flush=True)
-            except Exception as e:
-                self.on_error("Failed to load STT model:\n" + str(e))
-                self.on_status("STT load failed.")
-                self.stt = None
-                return False
+    def _build_prompt(self) -> str:
+        ex_path = os.path.join(self.assets_dir, "examples.txt")
+        examples = ""
+        if os.path.exists(ex_path):
+            with open(ex_path, "r", encoding="utf-8") as f:
+                examples = f.read().strip()
+        return (
+            "You are transcribing an ultrasound medical dictation.\n"
+            "Korean and English mixed medical terms must be written in correct English spelling.\n"
+            f"{examples}\n"
+        )
 
-        if self.thread is None or (hasattr(self.thread, "isRunning") and not self.thread.isRunning()):
-            self.worker = Worker(self.audio_q, self.stt, self.corrector)
-            self.thread = QThread()
-            self.worker.moveToThread(self.thread)
-            self.thread.started.connect(self.worker.run)
-            self.worker.partial.connect(self.on_partial)
-            self.worker.status.connect(self.on_status)
-            self.worker.error.connect(self.on_error)
-        return True
+    def _start_stt_process(self):
+        if self._stt_proc and self._stt_proc.is_alive():
+            return
+        self.status_label.setText("Starting STT subprocess...")
+        self._out_q = mp.Queue()
+        self._ctrl_q = mp.Queue()
+        self._stt_proc = mp.Process(
+            target=stt_worker_main,
+            args=(self._out_q, self._ctrl_q, self._stt_cfg),
+            daemon=True
+        )
+        self._stt_proc.start()
+
+    def _stop_stt_process(self):
+        if not self._stt_proc:
+            return
+        try:
+            if self._ctrl_q:
+                self._ctrl_q.put("STOP")
+        except Exception:
+            pass
+        self._stt_proc.join(timeout=3)
+        if self._stt_proc.is_alive():
+            self._stt_proc.terminate()
+        self._stt_proc = None
+        self._out_q = None
+        self._ctrl_q = None
+        self.status_label.setText("Stopped.")
 
     def toggle(self):
-        if self.thread and self.thread.isRunning():
-            self.stop()
+        if self._stt_proc and self._stt_proc.is_alive():
+            self._stop_stt_process()
         else:
-            self.start()
-
-    def start(self):
-        if not self._ensure_worker():
-            return
-        self.capture.start()
-        self.thread.start()
-        self.on_status("Started.")
-
-    def stop(self):
-        if self.thread and self.thread.isRunning():
-            self.worker.stop()
-            self.thread.quit()
-            self.thread.wait()
-        self.capture.stop()
+            self._start_stt_process()
 
     def reset(self):
-        self.stop()
-        self.capture.reset()
+        self._stop_stt_process()
         self.text_live.clear()
         self.text_edit.clear()
-        self.raw_text_accum = ""
-        self.corrected_text_accum = ""
         self.last_report = ""
-        self.on_status("Reset.")
+        self.status_label.setText("Reset.")
 
-    def on_partial(self, corrected: str, changes: list):
-        self.corrected_text_accum += corrected + "\n"
-        self.text_live.append(corrected)
-        self.text_edit.append(corrected)
-
-    def on_status(self, s: str):
-        self.status_label.setText(s)
-
-    def on_error(self, msg: str):
-        QMessageBox.critical(self, "Error", msg)
+    def _drain_out_queue(self):
+        if not self._out_q:
+            return
+        try:
+            while True:
+                msg = self._out_q.get_nowait()
+                mtype = msg.get("type")
+                if mtype == "status":
+                    self.status_label.setText(msg.get("msg", ""))
+                elif mtype == "error":
+                    QMessageBox.critical(self, "STT Error", msg.get("msg", ""))
+                elif mtype == "text":
+                    text = msg.get("text", "")
+                    if text:
+                        corrected, _changes = self.corrector.correct(text)
+                        self.text_live.append(corrected)
+                        self.text_edit.append(corrected)
+        except Exception:
+            pass
 
     def generate_report(self):
         final_text = self.text_edit.toPlainText().strip()
         if not final_text:
-            self.on_status("No text to report.")
+            self.status_label.setText("No text to report.")
             return
         structured = self.structurer.extract(final_text)
         report = self.renderer.render(structured=structured, cleaned_text=final_text)
         self.last_report = report
         self.text_live.append("\n--- [REPORT] ---\n" + report + "\n--- [/REPORT] ---\n")
-        self.on_status("Report generated.")
+        self.status_label.setText("Report generated.")
 
     def save(self):
         final_text = self.text_edit.toPlainText().strip()
         if not final_text:
-            self.on_status("Nothing to save.")
+            self.status_label.setText("Nothing to save.")
             return
         structured = self.structurer.extract(final_text)
         report = self.last_report or self.renderer.render(structured=structured, cleaned_text=final_text)
         folder = save_session(
             base_dir=self.sessions_dir,
-            raw_text=self.raw_text_accum,
+            raw_text="",
             corrected_text=final_text,
             report_text=report,
             structured=structured
         )
-        self.on_status(f"Saved session: {folder}")
+        self.status_label.setText(f"Saved session: {folder}")
 
     def closeEvent(self, event):
-        if not SAFE_MODE:
-            self.stop()
+        self._stop_stt_process()
         super().closeEvent(event)
