@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ultrasound Web Recorder</title>
+  {% load static %}
+  <link rel="stylesheet" href="{% static 'recorder/style.css' %}">
+</head>
+<body>
+  <main class="container">
+    <h1>초음파 리포트 음성 녹음 (Django Web)</h1>
+
+    <div class="controls">
+      <button id="startBtn">녹음 시작</button>
+      <button id="stopBtn" disabled>녹음 종료</button>
+      <button id="uploadBtn" disabled>서버 업로드</button>
+    </div>
+
+    <section>
+      <h2>상태</h2>
+      <p id="status">대기 중</p>
+    </section>
+
+    <section>
+      <h2>브라우저 인식 텍스트 (FE 출력)</h2>
+      <textarea id="transcript" rows="8" placeholder="인식된 텍스트가 여기에 표시됩니다..."></textarea>
+    </section>
+
+    <section>
+      <h2>녹음 재생</h2>
+      <audio id="player" controls></audio>
+    </section>
+
+    <section>
+      <h2>서버 응답</h2>
+      <pre id="serverResponse">(아직 없음)</pre>
+    </section>
+  </main>
+
+  <script>
+    window.CSRF_TOKEN = "{{ csrf_token }}";
+  </script>
+  <script src="{% static 'recorder/app.js' %}"></script>
+</body>
+</html>

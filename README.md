@@ -309,3 +309,29 @@ python .\diagnostics\stt_subprocess_smoke.py
   - 남은 과제는 “Transcribe 트리거/언어/모델 설정”을 디버그 상태 메시지로 확인하며 텍스트를 안정적으로 받는 단계.
 
 ---
+
+---
+
+## 12. Django 웹 모듈 추가 (브라우저 녹음 + FE 텍스트 표시)
+
+`web_django/` 폴더에 별도 Django 서버 모듈을 추가했습니다.
+
+### 실행 방법
+
+```bash
+cd web_django
+python manage.py migrate
+python manage.py runserver 0.0.0.0:8000
+```
+
+브라우저에서 `http://localhost:8000` 접속 후:
+
+1. **녹음 시작** 버튼으로 마이크 녹음 시작
+2. 브라우저 SpeechRecognition으로 인식된 텍스트를 화면 textarea에 실시간 표시
+3. **녹음 종료** 후 재생 확인
+4. **서버 업로드** 클릭 시 녹음 파일(`recordings/`) + 인식 텍스트를 Django API로 전송
+
+### 엔드포인트
+
+- `GET /` : 녹음 페이지
+- `POST /api/upload-audio/` : 녹음 파일 업로드 + transcript 저장 응답
