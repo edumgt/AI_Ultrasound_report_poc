@@ -1,5 +1,9 @@
 # AI Ultrasound Report PoC
 
+![alt text](image-1.png)
+
+---
+
 ![초음파 자동 리포트 PoC 기술 스택](image.png)
 
 이 저장소는 **초음파 진단 구술 자동 리포팅 PoC**입니다.

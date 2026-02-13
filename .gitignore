@@ -2,3 +2,6 @@
 .venv-linux
 __pycache__/
 *.pyc
+venv/
+env/
+ENV/
